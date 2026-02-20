@@ -4,6 +4,7 @@ import {
   KEYCLOAK_TOKEN_URL,
   ALLERGENS,
   INTOLERANCES,
+  PROFILE_ID,
 } from './constants'
 
 export async function getToken(username, password) {
@@ -42,8 +43,7 @@ const QUERY_CONTEXT = {
   so: 'http://schema.org/',
 }
 
-export const PROFILE_ID = 'tabulas:profile/alice/allergies'
-
+// Use PROFILE_ID from constants (full IRI) so GraphQL Resource(id: ...) and kss:with find the profile after login.
 async function runQuery(token, query) {
   const r = await fetch(KVASIR_QUERY_URL, {
     method: 'POST',
@@ -99,17 +99,18 @@ export async function loadProfile(token) {
   const profileAllergiesObj = toArray(profileAllergiesRaw?.[0]?._object)
   const profileIntolerancesObj = toArray(profileIntolerancesRaw?.[0]?._object)
 
-  // Track ALL refs (canonical and skolemized) - we'll filter by matching entries later
+  // Track refs that are absolute IRIs (skip blank nodes _:b0 so we don't query them and hit validation errors)
+  const isAbsoluteIRI = (id) => typeof id === 'string' && (id.startsWith('http:') || id.startsWith('https:'))
   if (profileAllergiesObj.length) {
     profileAllergiesObj.forEach((node) => {
       const refId = getIdFromRawRDF(node)
-      if (refId) profileAllergyIds.push(refId)
+      if (refId && isAbsoluteIRI(refId)) profileAllergyIds.push(refId)
     })
   }
   if (profileIntolerancesObj.length) {
     profileIntolerancesObj.forEach((node) => {
       const refId = getIdFromRawRDF(node)
-      if (refId) profileIntoleranceIds.push(refId)
+      if (refId && isAbsoluteIRI(refId)) profileIntoleranceIds.push(refId)
     })
   }
 
@@ -162,9 +163,9 @@ function getValueFromRawRDF(field) {
 }
 
 /**
- * Build Changes API payload: replace whole profile every time.
- * kss:with selects the profile, kss:delete: ["*"] wipes it, kss:insert puts back one profile with current selection.
- * No ref tracking, no per-ref deletes — one simple replace.
+ * Build Changes API payload. We use insert-only to avoid "IRI is not a valid absolute IRI: '_:b0'"
+ * when the pod already contains blank-node entries (e.g. from sample data without @id on entries).
+ * Every entry has an explicit @id so we don't create new blank nodes. Load deduplicates by code (sets).
  */
 export function buildChangesPayload(profile) {
   const context = {
@@ -176,10 +177,11 @@ export function buildChangesPayload(profile) {
   const allergyList = profile.allergies || []
   const intoleranceList = profile.intolerances || []
 
+  // Use path-style IRIs (single #) so each resource has one clear absolute IRI
   const allergyEntries = allergyList.map((code) => {
     const item = ALLERGENS.find((a) => a.code === code)
     return {
-      '@id': `${PROFILE_ID}#allergy-${code}`,
+      '@id': `https://tabulas.eu/vocab#profile/alice/allergies/allergy/${code}`,
       '@type': 'tabulas:AllergenEntry',
       'tabulas:allergenCode': code,
       'so:name': item?.name ?? code,
@@ -190,7 +192,7 @@ export function buildChangesPayload(profile) {
   const intoleranceEntries = intoleranceList.map((code) => {
     const item = INTOLERANCES.find((i) => i.code === code)
     return {
-      '@id': `${PROFILE_ID}#intolerance-${code}`,
+      '@id': `https://tabulas.eu/vocab#profile/alice/allergies/intolerance/${code}`,
       '@type': 'tabulas:IntoleranceEntry',
       'tabulas:intoleranceCode': code,
       'so:name': item?.name ?? code,
@@ -200,8 +202,6 @@ export function buildChangesPayload(profile) {
 
   return {
     '@context': context,
-    'kss:with': `{ Resource(id: "${PROFILE_ID}") { id } }`,
-    'kss:delete': ['*'],
     'kss:insert': [
       {
         '@id': PROFILE_ID,

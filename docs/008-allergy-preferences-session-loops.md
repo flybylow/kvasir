@@ -95,6 +95,26 @@ Fix for that was **replace semantics**: e.g. `kss:with` + `kss:delete: ["*"]` fo
 
 ---
 
+## After login again: selections don't load
+
+**Symptom:** You log in (or log in again) and the form shows no selections, or selections don't persist.
+
+**Cause:** The profile in the pod is stored under its **full IRI** (e.g. `https://tabulas.eu/vocab#profile/alice/allergies`). If the frontend used the **curie** (`tabulas:profile/alice/allergies`) in the GraphQL `Resource(id: ...)` query and in `kss:with`, the server may not resolve it, so Load returns nothing and the form appears empty after login.
+
+**Fix:** Use the **full IRI** for the profile in GraphQL and in `kss:with`. In this repo, `constants.js` defines `PROFILE_ID` as the full IRI; `api.js` must import and use that same `PROFILE_ID`, not a local curie.
+
+---
+
+## Change request error: IRI is not a valid absolute IRI: '_:b0'
+
+**Symptom:** Save returns 201 but the change request status shows: `IRI is not a valid absolute IRI: '_:b0'`.
+
+**Cause:** The pod already contains data where some resources were stored as **blank nodes** (`_:b0`, `_:b1`, …). That happens when JSON-LD is inserted with **nested objects that have no `@id`** (e.g. the sample `allergen-profile-alice-example.jsonld` has allergy/intolerance entries without `@id`). When we use **kss:with + kss:delete: ["*"]**, the server processes all triples for the profile, including ones that reference those blank nodes, and then rejects them because `_:b0` is not a valid absolute IRI.
+
+**Fix:** Use **insert-only** for Save (no `kss:with`, no `kss:delete`). Give **every** nested resource an explicit **absolute @id** (e.g. `https://tabulas.eu/vocab#profile/alice/allergies/allergy/gluten`) so we never create new blank nodes. Load already builds sets of codes from all entries it finds, so duplicate entries (old blank-node + new IRI) still produce the correct checkbox state. The graph will accumulate triples over time; to clean up, run the erase script or reset the pod if needed.
+
+---
+
 ## Rule #1: Always Keep the Wood Clean
 
 - When an API behaves unexpectedly: **check official documentation first**, then align code and payloads.
