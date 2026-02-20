@@ -24,3 +24,7 @@ Open http://localhost:5173. Log in with **alice** / **alice**, click **Load my p
 - **Save:** Builds JSON-LD with `kss:insert` (one AllergenProfile with allergies + intolerances lists) and POSTs to `/alice/changes`.
 
 Proxy in `vite.config.js` forwards `/api-kvasir` → `http://localhost:8080` and `/api-keycloak` → `http://localhost:8280` to avoid CORS.
+
+## Vercel / npm install warnings
+
+When you run `npm install` (e.g. during Vercel deploy) you may see deprecation warnings for packages like `whatwg-encoding`, `rimraf`, `glob`, `eslint@8`, etc. These come from **transitive dependencies** (Vite, React tooling, or Vercel’s environment), not from this app’s direct dependencies. They are warnings only and do not fail the build. Dependency ranges have been updated where possible; the rest will clear as upstream tooling updates.
