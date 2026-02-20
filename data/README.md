@@ -27,7 +27,27 @@ chmod +x scripts/ingest-allergen-profile.sh
 ./scripts/ingest-allergen-profile.sh data/allergen-profile.jsonld
 ```
 
-**One-time setup:** In Keycloak (http://localhost:8280, admin/admin): realm **quarkus** → **Clients** → **kvasir-ui** → **Settings** → enable **Direct access grants** and save. Ensure user **alice** has password **alice** (or set `ALICE_PASSWORD` when running the script).
+**One-time setup (and after any full reset):** Run `./scripts/enable-keycloak-direct-access-grants.sh` (needs curl + jq) or in Keycloak (http://localhost:8280, admin/admin): realm **quarkus** → **Clients** → **kvasir-ui** → **Settings** → enable **Direct access grants** (Resource owner password credentials) and save. Ensure user **alice** has password **alice** (or set `ALICE_PASSWORD` when running the script). Without this, the frontend login (and scripts that use password grant) will get “Client not allowed for direct access grants” and Load/Save may show 500 if the token is missing or invalid.
+
+### Erase the profile (start fresh)
+
+To clear the allergen profile so all checkboxes are empty:
+
+```bash
+node scripts/erase-allergen-profile-explicit.js
+```
+
+Then refresh the frontend. (This loads current refs and sends explicit deletes; the older `kss:with` + wildcard delete often does not match and leaves refs.)
+
+### Full cleanup (wipe pod and re-enable Keycloak)
+
+To wipe the whole pod and get a clean alice login:
+
+```bash
+./scripts/cleanup.sh
+```
+
+This runs `docker compose down -v` and `up -d` in `kvasir-server/compose`, then runs `enable-keycloak-direct-access-grants.sh`. Use `./scripts/cleanup.sh --profile` to only erase the allergen profile (no compose).
 
 ### Option 2: Manual (token + curl)
 
@@ -57,3 +77,8 @@ curl -X POST http://localhost:8080/alice/changes \
 ```
 
 You should see `https://tabulas.eu/vocab#profile/alice/allergies` and the typed graph (e.g. `tabulas:AllergenProfile`, `tabulas:AllergenEntry`, `tabulas:IntoleranceEntry`).
+
+### Load/Save 500 or login errors
+
+- **“Client not allowed for direct access grants”** or login fails: enable **Direct access grants** for client **kvasir-ui** in Keycloak (see One-time setup above).
+- **“Load failed 500”** or **“Save failed 500”**: the UI now shows the first 500 characters of the server response. Check that you are logged in (valid token). If the message is empty or unhelpful, check Kvasir logs in `kvasir-server/compose` (e.g. `docker compose logs -f`) and Keycloak logs.

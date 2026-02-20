@@ -20,7 +20,16 @@ export async function getToken(username, password) {
   })
   if (!r.ok) {
     const t = await r.text()
-    throw new Error(t || `Login failed ${r.status}`)
+    let msg = t || `Login failed ${r.status}`
+    try {
+      const err = JSON.parse(t)
+      if (err.error === 'unauthorized_client' || (err.error_description || '').includes('direct access grants')) {
+        msg = 'Keycloak: enable Direct access grants for client kvasir-ui (realm quarkus). Use alice / alice for the Kvasir demo pod.'
+      } else if (err.error === 'invalid_grant' || (err.error_description || '').toLowerCase().includes('invalid user credentials')) {
+        msg = 'Invalid username or password. For the Kvasir demo pod use alice / alice. If that fails, run: ./scripts/enable-keycloak-direct-access-grants.sh (creates/resets alice in Keycloak).'
+      }
+    } catch (_) {}
+    throw new Error(msg)
   }
   const data = await r.json()
   return data.access_token
@@ -33,7 +42,7 @@ const QUERY_CONTEXT = {
   so: 'http://schema.org/',
 }
 
-const PROFILE_ID = 'tabulas:profile/alice/allergies'
+export const PROFILE_ID = 'tabulas:profile/alice/allergies'
 
 async function runQuery(token, query) {
   const r = await fetch(KVASIR_QUERY_URL, {
@@ -44,8 +53,12 @@ async function runQuery(token, query) {
     },
     body: JSON.stringify({ '@context': QUERY_CONTEXT, query }),
   })
-  if (!r.ok) throw new Error(`Load failed ${r.status}`)
-  const json = await r.json()
+  const text = await r.text()
+  if (!r.ok) {
+    const msg = text || r.statusText
+    throw new Error(`Load failed ${r.status}${msg ? ': ' + msg.trim().slice(0, 500) : ''}`)
+  }
+  const json = text ? JSON.parse(text) : {}
   return json?.data?.Resource ?? []
 }
 
@@ -86,83 +99,55 @@ export async function loadProfile(token) {
   const profileAllergiesObj = toArray(profileAllergiesRaw?.[0]?._object)
   const profileIntolerancesObj = toArray(profileIntolerancesRaw?.[0]?._object)
 
+  // Track ALL refs (canonical and skolemized) - we'll filter by matching entries later
   if (profileAllergiesObj.length) {
     profileAllergiesObj.forEach((node) => {
       const refId = getIdFromRawRDF(node)
-      if (!refId) return
-      const normalized = normalizeId(refId)
-      // Only consider canonical IDs (our pattern) - ignore skolemized refs
-      if (normalized && (normalized.startsWith(canonicalIdPrefix) || refId.startsWith(canonicalIdPrefixCurie))) {
-        profileAllergyIds.push(refId) // Keep original format for query
-      }
+      if (refId) profileAllergyIds.push(refId)
     })
   }
   if (profileIntolerancesObj.length) {
     profileIntolerancesObj.forEach((node) => {
       const refId = getIdFromRawRDF(node)
-      if (!refId) return
-      const normalized = normalizeId(refId)
-      if (normalized && (normalized.startsWith(canonicalIdPrefix) || refId.startsWith(canonicalIdPrefixCurie))) {
-        profileIntoleranceIds.push(refId)
-      }
+      if (refId) profileIntoleranceIds.push(refId)
     })
   }
 
-  // 2) Single bulk query for entries (faster than N individual queries)
-  const profileAllergyIdSet = new Set(profileAllergyIds.map(normalizeId))
-  const profileIntoleranceIdSet = new Set(profileIntoleranceIds.map(normalizeId))
-  const [allAllergyEntries, allIntoleranceEntries] = await Promise.all([
-    runQuery(token, '{ Resource { id _object(predicate: "tabulas:allergenCode") { _rawRDF } } }'),
-    runQuery(token, '{ Resource { id _object(predicate: "tabulas:intoleranceCode") { _rawRDF } } }'),
-  ])
-  const matchedAllergyIds = new Set()
-  const matchedIntoleranceIds = new Set()
-  for (const res of allAllergyEntries) {
-    const id = Array.isArray(res.id) ? res.id[0] : res.id
-    const nid = normalizeId(id)
-    if (!profileAllergyIdSet.has(nid)) continue
-    matchedAllergyIds.add(nid)
-    const code = getValueFromRawRDF(res._object)
-    if (code) allergies.add(normalizeAllergenCode(code))
-  }
-  for (const res of allIntoleranceEntries) {
-    const id = Array.isArray(res.id) ? res.id[0] : res.id
-    const nid = normalizeId(id)
-    if (!profileIntoleranceIdSet.has(nid)) continue
-    matchedIntoleranceIds.add(nid)
-    const code = getValueFromRawRDF(res._object)
-    if (code) intolerances.add(code)
-  }
-  // Fallback: fetch any canonical ref not found in bulk result (ordering/limits/eventual consistency)
+  // Get code for each profile ref by querying that resource (bulk query is paginated and misses many entries)
   const safeId = (s) => (s && typeof s === 'string' ? s.replace(/\\/g, '\\\\').replace(/"/g, '\\"') : '')
-  for (const refId of profileAllergyIds) {
-    if (matchedAllergyIds.has(normalizeId(refId))) continue
-    try {
-      const [entry] = await runQuery(token, `{ Resource(id: "${safeId(refId)}") { id _object(predicate: "tabulas:allergenCode") { _rawRDF } } }`)
-      if (entry) {
-        const code = getValueFromRawRDF(toArray(entry._object))
-        if (code) allergies.add(normalizeAllergenCode(code))
-      }
-    } catch (_) { /* ignore */ }
+  const BATCH = 15
+  for (let i = 0; i < profileAllergyIds.length; i += BATCH) {
+    const batch = profileAllergyIds.slice(i, i + BATCH)
+    const results = await Promise.all(
+      batch.map((refId) =>
+        runQuery(token, `{ Resource(id: "${safeId(refId)}") { id _object(predicate: "tabulas:allergenCode") { _rawRDF } } }`)
+      )
+    )
+    for (const rows of results) {
+      const entry = rows?.[0]
+      if (!entry) continue
+      const code = getValueFromRawRDF(toArray(entry._object))
+      if (code) allergies.add(normalizeAllergenCode(code))
+    }
   }
-  for (const refId of profileIntoleranceIds) {
-    if (matchedIntoleranceIds.has(normalizeId(refId))) continue
-    try {
-      const [entry] = await runQuery(token, `{ Resource(id: "${safeId(refId)}") { id _object(predicate: "tabulas:intoleranceCode") { _rawRDF } } }`)
-      if (entry) {
-        const code = getValueFromRawRDF(toArray(entry._object))
-        if (code) intolerances.add(code)
-      }
-    } catch (_) { /* ignore */ }
+  for (let i = 0; i < profileIntoleranceIds.length; i += BATCH) {
+    const batch = profileIntoleranceIds.slice(i, i + BATCH)
+    const results = await Promise.all(
+      batch.map((refId) =>
+        runQuery(token, `{ Resource(id: "${safeId(refId)}") { id _object(predicate: "tabulas:intoleranceCode") { _rawRDF } } }`)
+      )
+    )
+    for (const rows of results) {
+      const entry = rows?.[0]
+      if (!entry) continue
+      const code = getValueFromRawRDF(toArray(entry._object))
+      if (code) intolerances.add(code)
+    }
   }
-
-  const loadedAllergies = Array.from(allergies).sort()
-  const loadedIntolerances = Array.from(intolerances).sort()
-  console.log('  📥 Loaded codes:', { allergies: loadedAllergies, intolerances: loadedIntolerances })
 
   return {
-    allergies: loadedAllergies,
-    intolerances: loadedIntolerances,
+    allergies: Array.from(allergies).sort(),
+    intolerances: Array.from(intolerances).sort(),
   }
 }
 
@@ -177,20 +162,21 @@ function getValueFromRawRDF(field) {
 }
 
 /**
- * Build kss:insert payload for save.
- * Order: entry resources first (each with @id tabulas:profile/alice/allergies#allergy-{code} or #intolerance-{code}), then the profile resource that references them.
- * Only the current selection is sent; save is insert-only so the server accumulates refs. Load filters to canonical IDs and deduplicates by code.
+ * Build Changes API payload: replace whole profile every time.
+ * kss:with selects the profile, kss:delete: ["*"] wipes it, kss:insert puts back one profile with current selection.
+ * No ref tracking, no per-ref deletes — one simple replace.
  */
 export function buildChangesPayload(profile) {
-  console.log('🟢 BUILD payload for save:')
-  console.log('  Profile codes:', { allergies: profile.allergies, intolerances: profile.intolerances })
   const context = {
     kss: 'https://kvasir.discover.ilabt.imec.be/vocab#',
     so: 'http://schema.org/',
     off: 'https://world.openfoodfacts.org/allergen/',
     tabulas: 'https://tabulas.eu/vocab#',
   }
-  const allergies = (profile.allergies || []).map((code) => {
+  const allergyList = profile.allergies || []
+  const intoleranceList = profile.intolerances || []
+
+  const allergyEntries = allergyList.map((code) => {
     const item = ALLERGENS.find((a) => a.code === code)
     return {
       '@id': `${PROFILE_ID}#allergy-${code}`,
@@ -201,7 +187,7 @@ export function buildChangesPayload(profile) {
       'tabulas:severity': 'allergy',
     }
   })
-  const intolerances = (profile.intolerances || []).map((code) => {
+  const intoleranceEntries = intoleranceList.map((code) => {
     const item = INTOLERANCES.find((i) => i.code === code)
     return {
       '@id': `${PROFILE_ID}#intolerance-${code}`,
@@ -211,26 +197,22 @@ export function buildChangesPayload(profile) {
       'tabulas:severity': 'intolerance',
     }
   })
-  
-  // Simple insert-only: profile accumulates refs, but load filters to canonical IDs and deduplicates by code
-  const payload = {
+
+  return {
     '@context': context,
+    'kss:with': `{ Resource(id: "${PROFILE_ID}") { id } }`,
+    'kss:delete': ['*'],
     'kss:insert': [
-      // Entries as top-level resources FIRST (so @id is preserved)
-      ...allergies,
-      ...intolerances,
-      // Profile references entries by @id (JSON-LD will link them)
       {
         '@id': PROFILE_ID,
         '@type': 'tabulas:AllergenProfile',
         'so:name': 'My Allergen Profile',
         'so:dateModified': new Date().toISOString().slice(0, 10),
-        'tabulas:allergies': allergies.map(a => ({ '@id': a['@id'] })),
-        'tabulas:intolerances': intolerances.map(i => ({ '@id': i['@id'] })),
+        'tabulas:allergies': allergyEntries,
+        'tabulas:intolerances': intoleranceEntries,
       },
     ],
   }
-  return payload
 }
 
 export async function saveProfile(token, profile) {

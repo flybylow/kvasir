@@ -5,15 +5,10 @@ import { ALLERGENS, INTOLERANCES } from './constants'
 const AUTOSAVE_DELAY_MS = 400
 
 function profileFromState(allergies, intolerances) {
-  const profile = {
+  return {
     allergies: ALLERGENS.filter((x) => allergies[x.code]).map((x) => x.code),
     intolerances: INTOLERANCES.filter((x) => intolerances[x.code]).map((x) => x.code),
   }
-  console.log('📋 profileFromState:', {
-    input: { allergies, intolerances },
-    output: profile,
-  })
-  return profile
 }
 
 export default function App() {
@@ -58,19 +53,10 @@ export default function App() {
     if (!silent) setLoadError('')
     try {
       const p = await loadProfile(t)
-      console.log('🔄 loadProfileIntoState: setting state from loaded profile:', p)
       const a = {}
       ALLERGENS.forEach((x) => (a[x.code] = p.allergies.includes(x.code)))
       const i = {}
       INTOLERANCES.forEach((x) => (i[x.code] = p.intolerances.includes(x.code)))
-      const checkedAllergies = Object.entries(a).filter(([_, checked]) => checked).map(([code]) => code)
-      const checkedIntolerances = Object.entries(i).filter(([_, checked]) => checked).map(([code]) => code)
-      console.log('  State being set:', {
-        allergies: a,
-        intolerances: i,
-        checkedAllergies,
-        checkedIntolerances,
-      })
       setAllergies(a)
       setIntolerances(i)
     } catch (err) {
@@ -95,17 +81,14 @@ export default function App() {
 
   const performSave = async (allergyState, intoleranceState) => {
     if (!token) return
-    console.log('💾 PERFORM SAVE:', { allergyState, intoleranceState })
     setSaveStatus('Saving…')
     try {
       const profile = profileFromState(allergyState, intoleranceState)
       await saveProfile(token, profile)
-      console.log('✅ Save completed successfully')
       setSaveStatus('Saved')
       pendingSaveRef.current = null
-      // Do not refetch here: eventual consistency can return stale data and overwrite the user's correct state
     } catch (err) {
-      console.error('❌ Save failed:', err)
+      console.error('Save failed:', err)
       setSaveStatus('Save failed: ' + (err.message || ''))
       pendingSaveRef.current = { allergyState, intoleranceState }
     }
@@ -120,18 +103,12 @@ export default function App() {
   }
 
   const toggleAllergy = (code) => {
-    const before = allergies[code]
-    const after = !before
-    const next = { ...allergies, [code]: after }
-    console.log('🔘 TOGGLE allergy:', code, { before, after, nextState: next })
+    const next = { ...allergies, [code]: !allergies[code] }
     setAllergies(next)
     scheduleAutosave(next, intolerances)
   }
   const toggleIntolerance = (code) => {
-    const before = intolerances[code]
-    const after = !before
-    const next = { ...intolerances, [code]: after }
-    console.log('🔘 TOGGLE intolerance:', code, { before, after, nextState: next })
+    const next = { ...intolerances, [code]: !intolerances[code] }
     setIntolerances(next)
     scheduleAutosave(allergies, next)
   }
